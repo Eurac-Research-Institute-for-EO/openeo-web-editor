@@ -1,0 +1,84 @@
+# EURAC openEO Web Editor — cluster deployment.
+# Served at https://openeo.eurac.edu/editor (same origin as the API, so no CORS).
+# Apply after the image is published on push to eurac-main:
+#   kubectl apply -f deploy/kubernetes.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openeo-web-editor
+  namespace: openeo
+  labels:
+    app: openeo-web-editor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openeo-web-editor
+  template:
+    metadata:
+      labels:
+        app: openeo-web-editor
+    spec:
+      containers:
+        - name: web-editor
+          image: ghcr.io/eurac-research-institute-for-eo/openeo-web-editor:eurac-main
+          # Always pull so a freshly-built :eurac-main is picked up on rollout
+          # (the API's IfNotPresent caused stale-tag issues — avoid that here).
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /editor/
+              port: 80
+            initialDelaySeconds: 3
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openeo-web-editor
+  namespace: openeo
+  labels:
+    app: openeo-web-editor
+spec:
+  selector:
+    app: openeo-web-editor
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+# Dedicated ingress for the /editor path on the existing host. Kept separate
+# from the API's openeo-ingress so the two can be managed independently.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: openeo-web-editor
+  namespace: openeo
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - openeo.eurac.edu
+      secretName: openeo-tls
+  rules:
+    - host: openeo.eurac.edu
+      http:
+        paths:
+          - path: /editor
+            pathType: Prefix
+            backend:
+              service:
+                name: openeo-web-editor
+                port:
+                  number: 80
