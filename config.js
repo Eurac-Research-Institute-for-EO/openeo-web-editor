@@ -2,7 +2,8 @@ export default {
 	// Set this to connect to a back-end automatically when opening the Web Editor,
 	// so you could set this to https://example.com and then the Web Editor connects
 	// to the corresponding back-end automatically.
-	serverUrl: '',
+	// EURAC openEO backend (version is auto-discovered via /.well-known/openeo).
+	serverUrl: 'https://openeo.eurac.edu/',
 
 	// The name of the service
 	serviceName: 'openEO',

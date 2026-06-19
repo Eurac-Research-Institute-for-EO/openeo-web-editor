@@ -11,6 +11,17 @@
 			<ParameterDataTypes v-if="!param.info" :ref="param.name" :editable="editable" :parameter="param" v-model="value[param.name]" :context="context" @schemaSelected="updateType(param, $event)" :parent="parent" />
 			<button v-if="!param.info && param.unspecified" title="Delete unspecified parameter" class="deleteBtn" type="button" @click="deleteParam(k)"><i class="fas fa-trash"></i></button>
 		</div>
+		<!-- #129: pre-fill `context` from a CWL tool's declared inputs -->
+		<div class="fieldRow cwlPopulateRow" v-if="isCwlRunUdf">
+			<label class="fieldLabel"></label>
+			<div class="fieldContainer cwlPopulate">
+				<button type="button" class="cwlPopulateBtn" :disabled="!cwlUdfValue || cwlLoading" @click="populateContextFromCwl" title="Read the CWL inputs and fill the context fields">
+					<i class="fas fa-magic"></i> {{ cwlLoading ? 'Reading CWL inputs…' : 'Populate context from CWL' }}
+				</button>
+				<div v-if="cwlError" class="cwlMsg cwlError">{{ cwlError }}</div>
+				<div v-else-if="cwlNotice" class="cwlMsg cwlNotice">{{ cwlNotice }}</div>
+			</div>
+		</div>
 	</div>
 </template>
 
@@ -50,16 +61,34 @@ export default {
 	data() {
 		return {
 			show: true,
-			schemas: {}
+			schemas: {},
+			cwlLoading: false,
+			cwlError: null,
+			cwlNotice: null
 		};
 	},
 	computed: {
+		...Utils.mapState(['connection']),
 		context() {
 			return {
 				values: this.value,
 				schemas: this.schemas,
 				parameters: this.parameters
 			};
+		},
+		// #129: detect a run_udf node using the EOAP-CWL runtime so we can offer
+		// to pre-fill `context` from the CWL document's declared inputs.
+		isCwlRunUdf() {
+			let names = this.parameters.map(p => p && p.name);
+			if (!names.includes('udf') || !names.includes('context') || !names.includes('runtime')) {
+				return false;
+			}
+			let rt = this.value.runtime;
+			return typeof rt === 'string' && rt.toLowerCase() === 'eoap-cwl';
+		},
+		cwlUdfValue() {
+			let u = this.value.udf;
+			return (typeof u === 'string' && u.trim().length) ? u : null;
 		}
 	},
 	watch: {
@@ -86,6 +115,60 @@ export default {
 			this.$delete(this.parameters, key);
 			this.$delete(this.schemas, name);
 			this.$delete(this.value, name);
+		},
+		// #129: fetch the CWL document's input schema from the backend and merge
+		// the declared inputs into `context`. Inputs the executor auto-fills
+		// (job_id/user_id/openeo_data, see #127) are skipped; existing
+		// user-entered values are never overwritten.
+		async populateContextFromCwl() {
+			this.cwlError = null;
+			this.cwlNotice = null;
+			let udf = this.cwlUdfValue;
+			if (!udf) {
+				this.cwlError = 'Enter a CWL document or URL in the "udf" field first.';
+				return;
+			}
+			if (!this.connection) {
+				this.cwlError = 'Not connected to a backend.';
+				return;
+			}
+			this.cwlLoading = true;
+			try {
+				let isUrl = /^https?:\/\//i.test(udf.trim());
+				let body = isUrl ? { url: udf.trim() } : { cwl: udf };
+				let response = await this.connection._post('/cwl/inputs', body);
+				let inputs = (response && response.data && response.data.inputs) || {};
+				let base = (this.value.context && typeof this.value.context === 'object') ? this.value.context : {};
+				let context = Object.assign({}, base);
+				let added = 0, autofilled = 0, kept = 0;
+				for (let name of Object.keys(inputs)) {
+					let spec = inputs[name];
+					if (spec.autofilled) { autofilled++; continue; }
+					if (name in context) { kept++; continue; }
+					context[name] = spec.has_default ? spec.default : this.cwlEmptyForType(spec.type);
+					added++;
+				}
+				this.$set(this.value, 'context', context);
+				this.cwlNotice = `Added ${added} field(s)` +
+					(kept ? `, kept ${kept} existing` : '') +
+					(autofilled ? `, ${autofilled} auto-filled by backend` : '') + '.';
+			} catch (error) {
+				let detail = (error && error.message) ? error.message : String(error);
+				this.cwlError = `Could not read CWL inputs: ${detail}`;
+			} finally {
+				this.cwlLoading = false;
+			}
+		},
+		cwlEmptyForType(type) {
+			let t = Array.isArray(type) ? type.find(x => x !== 'null') : type;
+			if (typeof t === 'string') {
+				t = t.replace(/\?$/, '');
+			}
+			switch (t) {
+				case 'int': case 'long': case 'float': case 'double': return null;
+				case 'boolean': return false;
+				default: return '';
+			}
 		},
 		updateType(parameter, schema) {
 			this.$set(this.schemas, parameter.name, schema);
@@ -146,6 +229,30 @@ export default {
 <style lang="scss" scoped>
 .deleteBtn {
 	margin-left: 10px;
+}
+.cwlPopulate {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+
+	.cwlPopulateBtn {
+		cursor: pointer;
+
+		&:disabled {
+			cursor: default;
+			opacity: 0.6;
+		}
+	}
+	.cwlMsg {
+		margin-top: 0.5em;
+		font-size: 0.85em;
+	}
+	.cwlError {
+		color: #b00;
+	}
+	.cwlNotice {
+		color: #060;
+	}
 }
 </style>
 
