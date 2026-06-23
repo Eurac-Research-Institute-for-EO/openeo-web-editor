@@ -19,7 +19,12 @@
 					<i class="fas fa-magic"></i> {{ cwlLoading ? 'Reading CWL inputs…' : 'Populate context from CWL' }}
 				</button>
 				<div v-if="cwlError" class="cwlMsg cwlError">{{ cwlError }}</div>
-				<div v-else-if="cwlNotice" class="cwlMsg cwlNotice">{{ cwlNotice }}</div>
+				<template v-else-if="cwlNotice">
+					<div class="cwlMsg cwlNotice">{{ cwlNotice }}</div>
+					<ul v-if="cwlHints.length" class="cwlHints">
+						<li v-for="(hint, i) in cwlHints" :key="i">{{ hint }}</li>
+					</ul>
+				</template>
 			</div>
 		</div>
 	</div>
@@ -64,7 +69,8 @@ export default {
 			schemas: {},
 			cwlLoading: false,
 			cwlError: null,
-			cwlNotice: null
+			cwlNotice: null,
+			cwlHints: []
 		};
 	},
 	computed: {
@@ -123,6 +129,7 @@ export default {
 		async populateContextFromCwl() {
 			this.cwlError = null;
 			this.cwlNotice = null;
+			this.cwlHints = [];
 			let udf = this.cwlUdfValue;
 			if (!udf) {
 				this.cwlError = 'Enter a CWL document or URL in the "udf" field first.';
@@ -141,14 +148,29 @@ export default {
 				let base = (this.value.context && typeof this.value.context === 'object') ? this.value.context : {};
 				let context = Object.assign({}, base);
 				let added = 0, autofilled = 0, kept = 0;
+				let hints = [];
 				for (let name of Object.keys(inputs)) {
 					let spec = inputs[name];
 					if (spec.autofilled) { autofilled++; continue; }
 					if (name in context) { kept++; continue; }
-					context[name] = spec.has_default ? spec.default : this.cwlEmptyForType(spec.type);
+					let hasEnum = Array.isArray(spec.enum) && spec.enum.length > 0;
+					if (spec.has_default) {
+						context[name] = spec.default;
+					} else if (hasEnum) {
+						// Prefill with the first allowed value so it is valid out of the box.
+						context[name] = spec.enum[0];
+					} else {
+						context[name] = this.cwlEmptyForType(spec.type);
+					}
 					added++;
+					// Surface allowed values + description as guidance.
+					let parts = [];
+					if (hasEnum) { parts.push('one of: ' + spec.enum.join(', ')); }
+					if (spec.doc) { parts.push(spec.doc); }
+					if (parts.length) { hints.push(name + ' — ' + parts.join('; ')); }
 				}
 				this.$set(this.value, 'context', context);
+				this.cwlHints = hints;
 				this.cwlNotice = `Added ${added} field(s)` +
 					(kept ? `, kept ${kept} existing` : '') +
 					(autofilled ? `, ${autofilled} auto-filled by backend` : '') + '.';
@@ -252,6 +274,16 @@ export default {
 	}
 	.cwlNotice {
 		color: #060;
+	}
+	.cwlHints {
+		margin: 0.4em 0 0;
+		padding-left: 1.2em;
+		font-size: 0.8em;
+		color: #555;
+
+		li {
+			margin: 0.15em 0;
+		}
 	}
 }
 </style>
