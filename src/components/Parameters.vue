@@ -8,7 +8,7 @@
 					<Description :description="param.description" />
 				</div>
 			</label>
-			<ParameterDataTypes v-if="!param.info" :ref="param.name" :editable="editable" :parameter="param" v-model="value[param.name]" :context="context" @schemaSelected="updateType(param, $event)" :parent="parent" />
+			<ParameterDataTypes v-if="!param.info" :key="'pdt-' + param.name + '-' + cwlVersion" :ref="param.name" :editable="editable" :parameter="param" v-model="value[param.name]" :context="context" @schemaSelected="updateType(param, $event)" :parent="parent" />
 			<button v-if="!param.info && param.unspecified" title="Delete unspecified parameter" class="deleteBtn" type="button" @click="deleteParam(k)"><i class="fas fa-trash"></i></button>
 		</div>
 		<!-- #129: pre-fill `context` from a CWL tool's declared inputs -->
@@ -34,6 +34,7 @@
 import Utils from '../utils';
 import Description from '@openeo/vue-components/components/Description.vue';
 import ParameterDataTypes from './ParameterDataTypes.vue';
+import { ProcessParameter } from '@openeo/js-commons';
 
 export default {
 	name: 'Parameters',
@@ -70,7 +71,8 @@ export default {
 			cwlLoading: false,
 			cwlError: null,
 			cwlNotice: null,
-			cwlHints: []
+			cwlHints: [],
+			cwlVersion: 0
 		};
 	},
 	computed: {
@@ -145,35 +147,49 @@ export default {
 				let body = isUrl ? { url: udf.trim() } : { cwl: udf };
 				let response = await this.connection._post('/cwl/inputs', body);
 				let inputs = (response && response.data && response.data.inputs) || {};
-				let base = (this.value.context && typeof this.value.context === 'object') ? this.value.context : {};
-				let context = Object.assign({}, base);
-				let added = 0, autofilled = 0, kept = 0;
-				let hints = [];
+				// Build a JSON-schema object for `context` so the editor renders each
+				// input as its own field — with the description inline, enum as a
+				// dropdown, defaults and required markers — handled natively by the
+				// object editor via schema.properties.
+				let properties = {};
+				let required = [];
+				let added = 0, autofilled = 0;
 				for (let name of Object.keys(inputs)) {
 					let spec = inputs[name];
-					if (spec.autofilled) { autofilled++; continue; }
-					if (name in context) { kept++; continue; }
-					let hasEnum = Array.isArray(spec.enum) && spec.enum.length > 0;
-					if (spec.has_default) {
-						context[name] = spec.default;
-					} else if (hasEnum) {
-						// Prefill with the first allowed value so it is valid out of the box.
-						context[name] = spec.enum[0];
+					if (spec.autofilled) { autofilled++; continue; }   // backend fills these (#127)
+					let prop = { title: name };
+					if (spec.doc) { prop.description = spec.doc; }
+					if (Array.isArray(spec.enum) && spec.enum.length > 0) {
+						prop.type = 'string';
+						prop.enum = spec.enum;
+						prop.default = spec.has_default ? spec.default : spec.enum[0];
 					} else {
-						context[name] = this.cwlEmptyForType(spec.type);
+						prop.type = this.cwlJsonType(spec.type);
+						if (spec.has_default) { prop.default = spec.default; }
 					}
+					properties[name] = prop;
+					if (spec.required) { required.push(name); }
 					added++;
-					// Surface allowed values + description as guidance.
-					let parts = [];
-					if (hasEnum) { parts.push('one of: ' + spec.enum.join(', ')); }
-					if (spec.doc) { parts.push(spec.doc); }
-					if (parts.length) { hints.push(name + ' — ' + parts.join('; ')); }
 				}
-				this.$set(this.value, 'context', context);
-				this.cwlHints = hints;
-				this.cwlNotice = `Added ${added} field(s)` +
-					(kept ? `, kept ${kept} existing` : '') +
-					(autofilled ? `, ${autofilled} auto-filled by backend` : '') + '.';
+				let idx = this.parameters.findIndex(p => p && p.name === 'context');
+				if (idx === -1) {
+					this.cwlError = 'No "context" parameter to populate.';
+					return;
+				}
+				let schema = { type: 'object', properties: properties };
+				if (required.length) { schema.required = required; }
+				// Replace the generic context parameter with one whose schema
+				// describes the CWL inputs, then empty its value so the object
+				// editor prefills the described fields (attaching the inline
+				// descriptions, dropdowns and defaults).
+				let newParam = new ProcessParameter({ name: 'context', optional: true, schema: schema });
+				this.$set(this.parameters, idx, newParam);
+				this.$set(this.value, 'context', {});
+				// Force the context field to remount so it re-detects the new schema
+				// (ParameterDataTypes only runs type detection on create).
+				this.cwlVersion++;
+				this.cwlNotice = `Context structured from CWL: ${added} field(s)` +
+					(autofilled ? `, ${autofilled} auto-filled by the backend` : '') + '.';
 			} catch (error) {
 				let detail = (error && error.message) ? error.message : String(error);
 				this.cwlError = `Could not read CWL inputs: ${detail}`;
@@ -181,7 +197,17 @@ export default {
 				this.cwlLoading = false;
 			}
 		},
-		cwlEmptyForType(type) {
+		cwlJsonType(type) {
+				// Map a CWL type name (as normalised by the backend) to a JSON-schema type.
+				switch (type) {
+					case 'int': case 'long': return 'integer';
+					case 'float': case 'double': return 'number';
+					case 'boolean': return 'boolean';
+					case 'array': return 'array';
+					default: return 'string';   // string, File, enum, …
+				}
+			},
+			cwlEmptyForType(type) {
 			let t = Array.isArray(type) ? type.find(x => x !== 'null') : type;
 			if (typeof t === 'string') {
 				t = t.replace(/\?$/, '');
