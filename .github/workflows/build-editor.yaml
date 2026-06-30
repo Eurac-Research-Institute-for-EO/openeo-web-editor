@@ -17,6 +17,21 @@ jobs:
       contents: read
       packages: write
 
+    # Build one image per environment from the same commit; the only difference
+    # is the backend the editor is compiled to talk to (config.js serverUrl).
+    strategy:
+      matrix:
+        include:
+          - server_url: https://openeo.eurac.edu/
+            tags: |
+              type=sha,prefix=
+              type=raw,value=latest
+              type=raw,value=eurac-main
+              type=raw,value=stable
+          - server_url: https://dev.openeo.eurac.edu/
+            tags: |
+              type=raw,value=dev
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,10 +48,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,prefix=
-            type=raw,value=latest
-            type=raw,value=eurac-main
+          tags: ${{ matrix.tags }}
 
       - name: Build and push
         uses: docker/build-push-action@v5
@@ -44,5 +56,7 @@ jobs:
           context: .
           file: Dockerfile
           push: true
+          build-args: |
+            OPENEO_SERVER_URL=${{ matrix.server_url }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
